@@ -270,9 +270,9 @@ class ZIOProgram extends Program {
           .collect { case Some(x) => x }
 
         println(
-          s"result.successful = [${successes.sortBy(_._2).mkString(",")}]"
+          s"result.successful = [${successes.sorted.mkString(",")}]"
         )
-        println(s"result.failed = [${failures.sortBy(_._2).mkString(",")}]")
+        println(s"result.failed = [${failures.sorted.mkString(",")}]")
         println(s"result.timedOut = [${timeouts.mkString(",")}]")
     }
 
