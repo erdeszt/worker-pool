@@ -116,10 +116,10 @@ object Main {
 
   def main(args: Array[String]): Unit = {
     val test1start = System.currentTimeMillis()
-    test(LiveProgram())
+    test(ZIOProgram())
     println(s"Test 1 took: ${System.currentTimeMillis - test1start}")
     val test2start = System.currentTimeMillis()
-    test2(LiveProgram())
+    test2(ZIOProgram())
     println(s"Test 2 took: ${System.currentTimeMillis - test2start}")
     supervisorExecutor.shutdown()
   }

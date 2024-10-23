@@ -14,6 +14,7 @@ import scala.concurrent.{
 import scala.util.Success
 import scala.util.Failure
 import java.util.concurrent.atomic.AtomicReference
+import zio.ZIO
 
 trait Program {
   def program(tasks: List[Task], timeout: FiniteDuration, workers: Int): Unit
@@ -97,7 +98,7 @@ class LiveProgram extends Program {
       }
     }
 
-    /* NOTE: Small cheat, if we only allow `timeout` globally then 
+    /* NOTE: Small cheat, if we only allow `timeout` globally then
      * this will timeout sooner than the individual task timeouts so we need to account
      * for some administration overhead
      */
@@ -201,4 +202,79 @@ class Worker(val supervisor: Program)(implicit val ec: ExecutionContext)
       busy.getAndSet(false)
     }
   }
+}
+
+class ZIOProgram extends Program {
+  override def program(
+      tasks: List[Task],
+      timeout: FiniteDuration,
+      workers: Int
+  ): Unit =
+    val app = ZIO
+      .foreachPar(tasks) { task =>
+        ZIO
+          .fromFuture(_ => task.execute)
+          .either
+          .timed
+          .disconnect
+          .timeout(zio.Duration.fromScala(timeout))
+          .map {
+            case Some((duration, Right(_))) =>
+              TaskResult.Success(
+                FiniteDuration(
+                  duration.toMillis(),
+                  java.util.concurrent.TimeUnit.MILLISECONDS
+                )
+              )
+            case Some((duration, Left(_))) =>
+              TaskResult.Failure(
+                FiniteDuration(
+                  duration.toMillis(),
+                  java.util.concurrent.TimeUnit.MILLISECONDS
+                )
+              )
+            case None =>
+              TaskResult.Timeout
+          }
+      }
+      .withParallelism(workers)
+      .disconnect
+      .timeout(zio.Duration.fromScala(timeout + 500.millis))
+
+    val result = zio.Unsafe.unsafe { implicit unsafe =>
+      zio.Runtime.default.unsafe.run(app).getOrThrowFiberFailure()
+    }
+
+    result match {
+      case None => println("Failed to execute tasks in time")
+      case Some(taskResults) =>
+        val successes = taskResults.toList
+          .map {
+            case TaskResult.Success(duration) => Some(duration)
+            case _                            => None
+          }
+          .collect { case Some(x) => x }
+
+        val failures = taskResults.toList
+          .map {
+            case (TaskResult.Failure(duration)) => Some(duration)
+            case _                              => None
+          }
+          .collect { case Some(x) => x }
+
+        val timeouts = taskResults.toList
+          .map {
+            case (TaskResult.Timeout) => Some(())
+            case _                    => None
+          }
+          .collect { case Some(x) => x }
+
+        println(
+          s"result.successful = [${successes.sortBy(_._2).mkString(",")}]"
+        )
+        println(s"result.failed = [${failures.sortBy(_._2).mkString(",")}]")
+        println(s"result.timedOut = [${timeouts.mkString(",")}]")
+    }
+
+  override def onComplete(taskId: UUID, result: TaskResult): Unit = ()
 }
