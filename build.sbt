@@ -1,4 +1,4 @@
-scalaVersion := "2.13.5"
+scalaVersion := "3.5.0"
 
 organization := "com.pirum"
 organizationName := "Pirum Systems"
