@@ -1,9 +1,19 @@
 package com.pirum.exercises.worker
 
-import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.*
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.UUID
-import scala.concurrent.{Future, Await, TimeoutException, blocking}
-// import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.{
+  Future,
+  Await,
+  TimeoutException,
+  blocking,
+  ExecutionContext
+}
+import scala.util.Success
+import scala.util.Failure
+import java.util.concurrent.atomic.AtomicReference
 
 trait Program {
   def program(tasks: List[Task], timeout: FiniteDuration, workers: Int): Unit
@@ -18,16 +28,23 @@ enum TaskResult {
 
 class LiveProgram extends Program {
   var workers: List[Worker] = List.empty
+  // NOTE: Could use a concurrent hash map instead of synchronized in onComplete
   var taskResults: Map[UUID, TaskResult] = Map.empty
 
-  def program(tasks: List[Task], timeout: FiniteDuration, numberOfWorkers: Int): Unit =
-    val executor = java.util.concurrent.ScheduledThreadPoolExecutor(numberOfWorkers)
-    val supervisorExecutor = ThreadPoolExecutor(1)
+  def program(
+      tasks: List[Task],
+      timeout: FiniteDuration,
+      numberOfWorkers: Int
+  ): Unit =
+    val executor =
+      java.util.concurrent.ScheduledThreadPoolExecutor(numberOfWorkers)
+    val supervisorExecutor = Executors.newFixedThreadPool(1)
 
-    implicit val ec = supervisorExecutor
+    implicit val ec = ExecutionContext.fromExecutor(supervisorExecutor)
 
     for (i <- 0.to(numberOfWorkers)) {
-      val worker = Worker(this)
+      val worker =
+        Worker(this)(ExecutionContext.fromExecutor(executor))
       workers = worker :: workers
 
       executor.scheduleAtFixedRate(
@@ -63,9 +80,9 @@ class LiveProgram extends Program {
       var moreWorkToDo = true
 
       blocking {
+
         while (moreWorkToDo) {
           var allDone = true
-
 
           for (worker <- workers) {
             if (!worker.readyForWork()) {
@@ -76,84 +93,112 @@ class LiveProgram extends Program {
           if (allDone) {
             moreWorkToDo = false
           }
-
-          // Thread.`yield`()
         }
       }
     }
 
-    Await.ready(work, timeout)
+    /* NOTE: Small cheat, if we only allow `timeout` globally then 
+     * this will timeout sooner than the individual task timeouts so we need to account
+     * for some administration overhead
+     */
+    Await.ready(work, timeout + 500.milliseconds)
 
-    val successes = taskResults.toList.map {
-      case (id, TaskResult.Success(duration))  => Some((id, duration))
-      case _ => None
-    }.collect { case Some(x) => x}
+    supervisorExecutor.shutdown()
+    executor.shutdown()
 
-    val failures = taskResults.toList.map {
-      case (id, TaskResult.Failure(duration))  => Some((id, duration))
-      case _ => None
-    }.collect { case Some(x) => x}
+    val successes = taskResults.toList
+      .map {
+        case (id, TaskResult.Success(duration)) => Some((id, duration))
+        case _                                  => None
+      }
+      .collect { case Some(x) => x }
 
-    val timeouts = taskResults.toList.map {
-      case (id, TaskResult.Timeout)  => Some(id)
-      case _ => None
-    }.collect { case Some(x) => x}
+    val failures = taskResults.toList
+      .map {
+        case (id, TaskResult.Failure(duration)) => Some((id, duration))
+        case _                                  => None
+      }
+      .collect { case Some(x) => x }
+
+    val timeouts = taskResults.toList
+      .map {
+        case (id, TaskResult.Timeout) => Some(id)
+        case _                        => None
+      }
+      .collect { case Some(x) => x }
 
     println(s"result.successful = [${successes.sortBy(_._2).mkString(",")}]")
     println(s"result.failed = [${failures.sortBy(_._2).mkString(",")}]")
     println(s"result.timedOut = [${timeouts.mkString(",")}]")
 
-    
-  def onComplete(taskId: UUID, result: TaskResult) : Unit = {
-    taskResults += taskId -> result
+  def onComplete(taskId: UUID, result: TaskResult): Unit = {
+    synchronized {
+      taskResults += taskId -> result
+    }
   }
-
 
 }
 
-class Worker(val supervisor: Program) extends Runnable {
-  // TODO: Might need to indicate if we are ready to receive a task
-  var taskQueue = Option.empty[(UUID, Task, FiniteDuration)]
+class Worker(val supervisor: Program)(implicit val ec: ExecutionContext)
+    extends Runnable {
+  var taskQueue = AtomicReference(Option.empty[(UUID, Task, FiniteDuration)])
+  val busy = AtomicBoolean(false)
 
   def execute(taskId: UUID, task: Task, timeout: FiniteDuration): Unit =
-    assert(taskQueue.isEmpty == true)
-    taskQueue = Some((taskId, task, timeout))
+    val success = taskQueue.compareAndSet(None, Some((taskId, task, timeout)))
+    assert(success)
 
   def readyForWork(): Boolean = {
-    taskQueue.isEmpty
+    !busy.get() && taskQueue.get().isEmpty
   }
 
   def run() = {
-    // TODO: Synchronize
-    taskQueue match {
-      case None => ()
-      case Some((taskId, task, duration)) => 
-        println(s"Executing task: ${taskId}")
-        val start = System.currentTimeMillis()
-        try {
-          Await.ready(task.execute, duration)
-          supervisor.onComplete(
-            taskId, 
-            TaskResult.Success(
-              FiniteDuration(System.currentTimeMillis - start, java.util.concurrent.TimeUnit.MILLISECONDS)
-            )
-          )
-        } catch {
-          case e: InterruptedException =>
-          supervisor.onComplete(
-            taskId, 
-            TaskResult.Failure(
-              FiniteDuration(System.currentTimeMillis - start, java.util.concurrent.TimeUnit.MILLISECONDS)
-            )
-          )
-          case e: TimeoutException =>
-            supervisor.onComplete(taskId, TaskResult.Timeout)
-          case e => throw e
-        } finally {
-          println(s"Done executing ${taskId}")
-          taskQueue = None
-        }
+    val isBusy = busy.getAndSet(true)
+    assert(!isBusy)
+    try {
+      taskQueue.get() match {
+        case None => ()
+        case Some((taskId, task, duration)) =>
+          println(s"Executing task: ${taskId}")
+          val start = System.currentTimeMillis()
+          try {
+            Await.result(task.execute, duration)
 
+            println(s"${taskId} Success!")
+
+            supervisor.onComplete(
+              taskId,
+              TaskResult.Success(
+                FiniteDuration(
+                  System.currentTimeMillis - start,
+                  java.util.concurrent.TimeUnit.MILLISECONDS
+                )
+              )
+            )
+          } catch {
+            case e: TimeoutException =>
+              println(s"${taskId} Timed out")
+              supervisor.onComplete(
+                taskId,
+                TaskResult.Timeout
+              )
+            case e =>
+              println(s"${taskId} Failed with: ${e}")
+              supervisor.onComplete(
+                taskId,
+                TaskResult.Failure(
+                  FiniteDuration(
+                    System.currentTimeMillis - start,
+                    java.util.concurrent.TimeUnit.MILLISECONDS
+                  )
+                )
+              )
+          } finally {
+            taskQueue.getAndSet(None)
+          }
+      }
+    } finally {
+      busy.getAndSet(false)
     }
   }
 }

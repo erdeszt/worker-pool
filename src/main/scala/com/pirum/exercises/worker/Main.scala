@@ -2,56 +2,126 @@ package com.pirum.exercises.worker
 
 import scala.concurrent.duration.*
 import scala.concurrent.{Future, blocking}
-import scala.concurrent.ExecutionContext.Implicits.global
+import java.util.concurrent.Executors
+import scala.concurrent.ExecutionContext
 
-object Main extends App {
-  // def program(tasks: List[Task], timeout: FiniteDuration, workers: Int): Unit =
-  //   ???
-  //
+object Main {
+  val supervisorExecutor = Executors.newFixedThreadPool(4)
 
-  val program = LiveProgram()
+  implicit val ec: ExecutionContext =
+    ExecutionContext.fromExecutor(supervisorExecutor)
 
-  program.program(
-    List(
-      new Task {
-        def execute: Future[Unit] = {
-          Future {
-            println("Running task1")
-            blocking(Thread.sleep(3))
-            throw Exception("Blah")
+  def test(program: Program) = {
+    program.program(
+      List(
+        new Task {
+          def execute: Future[Unit] = {
+            Future {
+              println("Running task3")
+              blocking(Thread.sleep(3000))
+              throw Exception("Blah")
+            }
+          }
+        },
+        new Task {
+          def execute: Future[Unit] = {
+            Future {
+              println("Running task4")
+              blocking(Thread.sleep(4000))
+              ()
+            }
+          }
+        },
+        new Task {
+          def execute: Future[Unit] = {
+            Future {
+              println("Running task2")
+              blocking(Thread.sleep(2000))
+              ()
+            }
+          }
+        },
+        new Task {
+          def execute: Future[Unit] = {
+            Future {
+              println("Running task1")
+              blocking(Thread.sleep(1000))
+              throw Exception("Blah")
+            }
           }
         }
-      },
-      new Task {
-        def execute: Future[Unit] = {
-          Future {
-            println("Running task2")
-            blocking(Thread.sleep(4))
-            ()
+      ),
+      8.seconds,
+      4
+    )
+    println("Done with main program")
+  }
+
+  def test2(program: Program) = {
+    program.program(
+      List(
+        new Task {
+          def execute: Future[Unit] = {
+            Future {
+              println("Running task3")
+              blocking(Thread.sleep(3000))
+              throw Exception("Blah")
+            }
+          }
+        },
+        new Task {
+          def execute: Future[Unit] = {
+            Future {
+              println("Running task5")
+              while (true) {
+                blocking(Thread.sleep(1000))
+              }
+              ()
+            }
+          }
+        },
+        new Task {
+          def execute: Future[Unit] = {
+            Future {
+              println("Running task4")
+              blocking(Thread.sleep(4000))
+              ()
+            }
+          }
+        },
+        new Task {
+          def execute: Future[Unit] = {
+            Future {
+              println("Running task2")
+              blocking(Thread.sleep(2000))
+              ()
+            }
+          }
+        },
+        new Task {
+          def execute: Future[Unit] = {
+            Future {
+              println("Running task1")
+              blocking(Thread.sleep(1000))
+              ()
+            }
           }
         }
-      },
-      new Task {
-        def execute: Future[Unit] = {
-          Future {
-            println("Running task3")
-            blocking(Thread.sleep(2))
-            ()
-          }
-        }
-      },
-      new Task {
-        def execute: Future[Unit] = {
-          Future {
-            println("Running task4")
-            blocking(Thread.sleep(1))
-            throw Exception("Blah")
-          }
-        }
-      }
-    ),
-    8.seconds,
-    4
-  )
+      ),
+      8.seconds,
+      4
+    )
+    println("Done with main program")
+  }
+
+  def main(args: Array[String]): Unit = {
+    val test1start = System.currentTimeMillis()
+    test(LiveProgram())
+    println(s"Test 1 took: ${System.currentTimeMillis - test1start}")
+    val test2start = System.currentTimeMillis()
+    test2(LiveProgram())
+    println(s"Test 2 took: ${System.currentTimeMillis - test2start}")
+    supervisorExecutor.shutdown()
+  }
 
 }
