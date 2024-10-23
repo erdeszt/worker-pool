@@ -121,7 +121,7 @@ object Main {
     val test2start = System.currentTimeMillis()
     test2(ZIOProgram())
     println(s"Test 2 took: ${System.currentTimeMillis - test2start}")
-    supervisorExecutor.shutdown()
+    supervisorExecutor.shutdownNow()
   }
 
 }
